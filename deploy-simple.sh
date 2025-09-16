@@ -83,8 +83,6 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1001
-        fsGroup: 1001
       initContainers:
       - name: install-deps
         image: $IMAGE
@@ -157,7 +155,7 @@ spec:
           timeoutSeconds: 3
           failureThreshold: 3
         securityContext:
-          runAsUser: 1001
+          runAsNonRoot: true
       volumes:
       - name: data
         persistentVolumeClaim:
