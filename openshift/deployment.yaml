@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ipam4lab
+  labels:
+    app: ipam4lab
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ipam4lab
+  template:
+    metadata:
+      labels:
+        app: ipam4lab
+        version: v1
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: ipam4lab
+        image: ipam4lab:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: PUBLIC_NETWORK_CIDR
+          valueFrom:
+            configMapKeyRef:
+              name: ipam4lab-config
+              key: public_network_cidr
+        - name: DATABASE_PATH
+          value: "/data/ipam.db"
+        - name: PORT
+          value: "8080"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: ipam4lab-data

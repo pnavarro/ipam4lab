@@ -1,0 +1,64 @@
+---
+- name: "Deallocate Lab IP Addresses from IPAM4Lab"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # IPAM service configuration
+    ipam_service_url: "https://ipam4lab-route-your-namespace.apps.your-cluster.com"
+    lab_uid: "{{ lab_id | mandatory }}"
+    
+    # HTTP headers
+    http_headers:
+      Content-Type: "application/json"
+      Accept: "application/json"
+
+  tasks:
+    - name: "Check if allocation exists for lab UID: {{ lab_uid }}"
+      uri:
+        url: "{{ ipam_service_url }}/allocation/{{ lab_uid }}"
+        method: GET
+        headers: "{{ http_headers }}"
+        status_code: [200, 404]
+        return_content: yes
+      register: check_allocation
+      ignore_errors: yes
+
+    - name: "Display current allocation before deallocation"
+      debug:
+        msg: |
+          Current allocation for Lab UID: {{ lab_uid }}
+          - EXTERNAL_IP_WORKER_1: {{ check_allocation.json.env_vars.EXTERNAL_IP_WORKER_1 }}
+          - EXTERNAL_IP_WORKER_2: {{ check_allocation.json.env_vars.EXTERNAL_IP_WORKER_2 }}
+          - EXTERNAL_IP_WORKER_3: {{ check_allocation.json.env_vars.EXTERNAL_IP_WORKER_3 }}
+          - PUBLIC_NET_START: {{ check_allocation.json.env_vars.PUBLIC_NET_START }}
+          - PUBLIC_NET_END: {{ check_allocation.json.env_vars.PUBLIC_NET_END }}
+          - CONVERSION_HOST_IP: {{ check_allocation.json.env_vars.CONVERSION_HOST_IP }}
+      when: check_allocation.status == 200
+
+    - name: "Deallocate IP range for lab UID: {{ lab_uid }}"
+      uri:
+        url: "{{ ipam_service_url }}/deallocate"
+        method: DELETE
+        headers: "{{ http_headers }}"
+        body_format: json
+        body:
+          lab_uid: "{{ lab_uid }}"
+        status_code: 200
+        return_content: yes
+      register: deallocation_result
+      when: check_allocation.status == 200
+
+    - name: "Display deallocation result"
+      debug:
+        msg: "{{ deallocation_result.json.message }}"
+      when: check_allocation.status == 200 and deallocation_result is defined
+
+    - name: "Remove environment file if it exists"
+      file:
+        path: "./lab_{{ lab_uid }}_env.sh"
+        state: absent
+
+    - name: "Lab UID not found"
+      debug:
+        msg: "No allocation found for lab UID: {{ lab_uid }}"
+      when: check_allocation.status == 404

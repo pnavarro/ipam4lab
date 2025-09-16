@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ipam4lab-config
+  labels:
+    app: ipam4lab
+data:
+  public_network_cidr: "192.168.0.0/16"

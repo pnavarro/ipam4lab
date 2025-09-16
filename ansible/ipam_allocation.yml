@@ -1,0 +1,104 @@
+---
+- name: "Lab IP Address Management with IPAM4Lab"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # IPAM service configuration
+    ipam_service_url: "https://ipam4lab-route-your-namespace.apps.your-cluster.com"
+    lab_uid: "{{ lab_id | default('lab-' + ansible_date_time.epoch) }}"
+    
+    # HTTP headers
+    http_headers:
+      Content-Type: "application/json"
+      Accept: "application/json"
+
+  tasks:
+    - name: "Check if allocation already exists for lab UID: {{ lab_uid }}"
+      uri:
+        url: "{{ ipam_service_url }}/allocation/{{ lab_uid }}"
+        method: GET
+        headers: "{{ http_headers }}"
+        status_code: [200, 404]
+        return_content: yes
+      register: existing_allocation
+      ignore_errors: yes
+
+    - name: "Allocate new IP range for lab UID: {{ lab_uid }}"
+      uri:
+        url: "{{ ipam_service_url }}/allocate"
+        method: POST
+        headers: "{{ http_headers }}"
+        body_format: json
+        body:
+          lab_uid: "{{ lab_uid }}"
+        status_code: 201
+        return_content: yes
+      register: new_allocation
+      when: existing_allocation.status == 404
+
+    - name: "Set allocation facts from existing allocation"
+      set_fact:
+        allocation_response: "{{ existing_allocation.json }}"
+      when: existing_allocation.status == 200
+
+    - name: "Set allocation facts from new allocation"
+      set_fact:
+        allocation_response: "{{ new_allocation.json }}"
+      when: existing_allocation.status == 404
+
+    - name: "Display allocated IP addresses"
+      debug:
+        msg: |
+          Lab UID: {{ allocation_response.lab_uid }}
+          Allocation Details:
+          - EXTERNAL_IP_WORKER_1: {{ allocation_response.env_vars.EXTERNAL_IP_WORKER_1 }}
+          - EXTERNAL_IP_WORKER_2: {{ allocation_response.env_vars.EXTERNAL_IP_WORKER_2 }}
+          - EXTERNAL_IP_WORKER_3: {{ allocation_response.env_vars.EXTERNAL_IP_WORKER_3 }}
+          - PUBLIC_NET_START: {{ allocation_response.env_vars.PUBLIC_NET_START }}
+          - PUBLIC_NET_END: {{ allocation_response.env_vars.PUBLIC_NET_END }}
+          - CONVERSION_HOST_IP: {{ allocation_response.env_vars.CONVERSION_HOST_IP }}
+
+    - name: "Export environment variables to file"
+      copy:
+        content: |
+          export EXTERNAL_IP_WORKER_1={{ allocation_response.env_vars.EXTERNAL_IP_WORKER_1 }}
+          export EXTERNAL_IP_WORKER_2={{ allocation_response.env_vars.EXTERNAL_IP_WORKER_2 }}
+          export EXTERNAL_IP_WORKER_3={{ allocation_response.env_vars.EXTERNAL_IP_WORKER_3 }}
+          export PUBLIC_NET_START={{ allocation_response.env_vars.PUBLIC_NET_START }}
+          export PUBLIC_NET_END={{ allocation_response.env_vars.PUBLIC_NET_END }}
+          export CONVERSION_HOST_IP={{ allocation_response.env_vars.CONVERSION_HOST_IP }}
+        dest: "./lab_{{ lab_uid }}_env.sh"
+        mode: '0644'
+
+    - name: "Set facts for other playbooks to use"
+      set_fact:
+        external_ip_worker_1: "{{ allocation_response.env_vars.EXTERNAL_IP_WORKER_1 }}"
+        external_ip_worker_2: "{{ allocation_response.env_vars.EXTERNAL_IP_WORKER_2 }}"
+        external_ip_worker_3: "{{ allocation_response.env_vars.EXTERNAL_IP_WORKER_3 }}"
+        public_net_start: "{{ allocation_response.env_vars.PUBLIC_NET_START }}"
+        public_net_end: "{{ allocation_response.env_vars.PUBLIC_NET_END }}"
+        conversion_host_ip: "{{ allocation_response.env_vars.CONVERSION_HOST_IP }}"
+
+    - name: "Add allocated IPs to Ansible inventory"
+      add_host:
+        name: "worker-1"
+        ansible_host: "{{ external_ip_worker_1 }}"
+        groups: workers
+      
+    - name: "Add worker-2 to inventory"
+      add_host:
+        name: "worker-2"
+        ansible_host: "{{ external_ip_worker_2 }}"
+        groups: workers
+      
+    - name: "Add worker-3 to inventory"
+      add_host:
+        name: "worker-3"
+        ansible_host: "{{ external_ip_worker_3 }}"
+        groups: workers
+
+    - name: "Add conversion host to inventory"
+      add_host:
+        name: "conversion-host"
+        ansible_host: "{{ conversion_host_ip }}"
+        groups: conversion_hosts

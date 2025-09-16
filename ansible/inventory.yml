@@ -1,0 +1,31 @@
+---
+# Example inventory file showing how to use IPAM4Lab with Ansible
+# This can be used after running the ipam_allocation.yml playbook
+
+all:
+  children:
+    lab_environments:
+      children:
+        workers:
+          hosts:
+            worker-1:
+              ansible_host: "{{ external_ip_worker_1 | default('192.168.0.10') }}"
+              ansible_user: lab-user
+              ansible_ssh_private_key_file: ~/.ssh/lab_key
+            worker-2:
+              ansible_host: "{{ external_ip_worker_2 | default('192.168.0.11') }}"
+              ansible_user: lab-user
+              ansible_ssh_private_key_file: ~/.ssh/lab_key
+            worker-3:
+              ansible_host: "{{ external_ip_worker_3 | default('192.168.0.12') }}"
+              ansible_user: lab-user
+              ansible_ssh_private_key_file: ~/.ssh/lab_key
+        conversion_hosts:
+          hosts:
+            conversion-host:
+              ansible_host: "{{ conversion_host_ip | default('192.168.0.29') }}"
+              ansible_user: lab-user
+              ansible_ssh_private_key_file: ~/.ssh/lab_key
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    public_net_range: "{{ public_net_start | default('192.168.0.20') }}-{{ public_net_end | default('192.168.0.30') }}"

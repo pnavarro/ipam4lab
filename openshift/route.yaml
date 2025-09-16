@@ -1,0 +1,15 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ipam4lab-route
+  labels:
+    app: ipam4lab
+spec:
+  to:
+    kind: Service
+    name: ipam4lab-service
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

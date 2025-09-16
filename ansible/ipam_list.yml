@@ -1,0 +1,43 @@
+---
+- name: "List all Lab IP Allocations from IPAM4Lab"
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # IPAM service configuration
+    ipam_service_url: "https://ipam4lab-route-your-namespace.apps.your-cluster.com"
+    
+    # HTTP headers
+    http_headers:
+      Content-Type: "application/json"
+      Accept: "application/json"
+
+  tasks:
+    - name: "Get all active allocations"
+      uri:
+        url: "{{ ipam_service_url }}/allocations"
+        method: GET
+        headers: "{{ http_headers }}"
+        status_code: 200
+        return_content: yes
+      register: all_allocations
+
+    - name: "Display all active allocations"
+      debug:
+        msg: |
+          Lab UID: {{ item.lab_uid }}
+          Allocated at: {{ item.allocated_at }}
+          IPs:
+            - EXTERNAL_IP_WORKER_1: {{ item.external_ip_worker_1 }}
+            - EXTERNAL_IP_WORKER_2: {{ item.external_ip_worker_2 }}
+            - EXTERNAL_IP_WORKER_3: {{ item.external_ip_worker_3 }}
+            - PUBLIC_NET_START: {{ item.public_net_start }}
+            - PUBLIC_NET_END: {{ item.public_net_end }}
+            - CONVERSION_HOST_IP: {{ item.conversion_host_ip }}
+          ---
+      loop: "{{ all_allocations.json.allocations }}"
+      when: all_allocations.json.allocations | length > 0
+
+    - name: "No active allocations found"
+      debug:
+        msg: "No active lab allocations found."
+      when: all_allocations.json.allocations | length == 0
