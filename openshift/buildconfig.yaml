@@ -8,7 +8,7 @@ spec:
   source:
     type: Git
     git:
-      uri: https://github.com/your-repo/ipam4lab.git  # Update with your repo
+      uri: https://github.com/pnavarro/ipam4lab.git  # Update with your repo
       ref: main
     contextDir: .
   strategy:
