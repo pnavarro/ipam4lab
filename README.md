@@ -180,6 +180,10 @@ Health check endpoint.
 ### 1. Build and Deploy
 
 ```bash
+# Easy deployment with script
+./deploy.sh ipam4lab 192.168.0.0/16
+
+# Or manually:
 # Create namespace
 oc new-project ipam4lab
 
@@ -188,6 +192,21 @@ oc apply -f openshift/
 
 # Wait for deployment
 oc rollout status deployment/ipam4lab
+```
+
+### 4. Undeploy
+
+```bash
+# Remove IPAM4Lab from OpenShift
+./undeploy.sh ipam4lab
+
+# Keep the namespace but remove the app
+./undeploy.sh ipam4lab --keep-namespace
+
+# Interactive prompts will ask about:
+# - Confirming resource deletion
+# - Deleting PVC (database data)
+# - Deleting the namespace
 ```
 
 ### 2. Configuration
