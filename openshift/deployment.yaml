@@ -21,7 +21,7 @@ spec:
       containers:
       - name: ipam4lab
         image: ipam4lab:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
           protocol: TCP
