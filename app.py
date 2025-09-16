@@ -103,9 +103,9 @@ class IPAMManager:
             raise ValueError("Subnet too small for allocation")
         
         # Allocate specific IPs according to the pattern
-        external_ip_worker_1 = str(subnet_hosts[9])   # .10
-        external_ip_worker_2 = str(subnet_hosts[10])  # .11
-        external_ip_worker_3 = str(subnet_hosts[11])  # .12
+        external_ip_worker_1 = str(subnet_hosts[10])  # .11
+        external_ip_worker_2 = str(subnet_hosts[11])  # .12
+        external_ip_worker_3 = str(subnet_hosts[12])  # .13
         public_net_start = str(subnet_hosts[19])      # .20
         public_net_end = str(subnet_hosts[29])        # .30
         conversion_host_ip = str(subnet_hosts[28])    # .29
@@ -255,6 +255,59 @@ class IPAMManager:
             
             conn.close()
             return allocations
+    
+    def get_allocation_stats(self):
+        """Get allocation statistics and capacity information"""
+        with db_lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Count active allocations
+            cursor.execute('SELECT COUNT(*) FROM allocations WHERE status = "active"')
+            active_allocations = cursor.fetchone()[0]
+            
+            # Calculate total capacity (number of /24 subnets available)
+            total_capacity = 2 ** (24 - self.network.prefixlen)
+            
+            # Calculate utilization percentage
+            utilization_percent = (active_allocations / total_capacity) * 100 if total_capacity > 0 else 0
+            
+            # Get subnet usage information
+            cursor.execute('''
+                SELECT subnet_start, COUNT(*) as count
+                FROM allocations 
+                WHERE status = "active"
+                GROUP BY subnet_start
+                ORDER BY subnet_start
+            ''')
+            
+            subnet_usage = []
+            for row in cursor.fetchall():
+                subnet_usage.append({
+                    'subnet': f"{row[0]}/24",
+                    'labs_allocated': row[1]
+                })
+            
+            conn.close()
+            
+            stats = {
+                'network_cidr': str(self.network),
+                'active_allocations': active_allocations,
+                'total_capacity': total_capacity,
+                'utilization_percent': round(utilization_percent, 3),
+                'subnets_per_lab': 1,  # Each lab gets one /24 subnet
+                'subnet_usage': subnet_usage,
+                'next_available_subnet': None
+            }
+            
+            # Try to get next available subnet
+            try:
+                next_subnet = self.get_next_available_subnet()
+                stats['next_available_subnet'] = str(next_subnet)
+            except ValueError:
+                stats['next_available_subnet'] = None
+            
+            return stats
 
 # Initialize IPAM manager
 ipam = IPAMManager(DATABASE_PATH, PUBLIC_NETWORK_CIDR)
@@ -356,6 +409,17 @@ def list_allocations():
         
     except Exception as e:
         logger.error(f"Error listing allocations: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/stats', methods=['GET'])
+def get_stats():
+    """Get allocation statistics and capacity information"""
+    try:
+        stats = ipam.get_allocation_stats()
+        return jsonify(stats)
+        
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
