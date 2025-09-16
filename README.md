@@ -15,22 +15,35 @@ IPAM4Lab is a Flask-based REST API service designed to allocate and manage IP ad
 
 The application allocates /24 subnets from the configured network CIDR and assigns specific IPs within each subnet:
 
-- **Worker IPs**: .10, .11, .12 (EXTERNAL_IP_WORKER_1, EXTERNAL_IP_WORKER_2, EXTERNAL_IP_WORKER_3)
+- **Worker IPs**: .11, .12, .13 (EXTERNAL_IP_WORKER_1, EXTERNAL_IP_WORKER_2, EXTERNAL_IP_WORKER_3)
 - **Public Network Range**: .20 to .30 (PUBLIC_NET_START, PUBLIC_NET_END)
 - **Conversion Host**: .29 (CONVERSION_HOST_IP)
 
-### Example Allocation
+### Example Allocations
 
-For LAB_UID `lab-001` with network CIDR `192.168.0.0/16`, the first allocation would be:
+Each lab gets its own dedicated /24 subnet:
 
+**First allocation** (`test-001`):
 ```
-EXTERNAL_IP_WORKER_1=192.168.0.10
-EXTERNAL_IP_WORKER_2=192.168.0.11
-EXTERNAL_IP_WORKER_3=192.168.0.12
+EXTERNAL_IP_WORKER_1=192.168.0.11
+EXTERNAL_IP_WORKER_2=192.168.0.12
+EXTERNAL_IP_WORKER_3=192.168.0.13
 PUBLIC_NET_START=192.168.0.20
 PUBLIC_NET_END=192.168.0.30
 CONVERSION_HOST_IP=192.168.0.29
 ```
+
+**Second allocation** (`test-002`):
+```
+EXTERNAL_IP_WORKER_1=192.168.1.11
+EXTERNAL_IP_WORKER_2=192.168.1.12
+EXTERNAL_IP_WORKER_3=192.168.1.13
+PUBLIC_NET_START=192.168.1.20
+PUBLIC_NET_END=192.168.1.30
+CONVERSION_HOST_IP=192.168.1.29
+```
+
+**Capacity**: With a `192.168.0.0/16` network, you can allocate up to **256 labs** (one per /24 subnet).
 
 ## Quick Start
 
@@ -175,24 +188,54 @@ Health check endpoint.
 }
 ```
 
+### GET /stats
+
+Get allocation statistics and capacity information.
+
+**Response (200):**
+```json
+{
+  "network_cidr": "192.168.0.0/16",
+  "active_allocations": 2,
+  "total_capacity": 256,
+  "utilization_percent": 0.781,
+  "subnets_per_lab": 1,
+  "subnet_usage": [
+    {
+      "subnet": "192.168.0.0/24",
+      "labs_allocated": 1
+    },
+    {
+      "subnet": "192.168.1.0/24", 
+      "labs_allocated": 1
+    }
+  ],
+  "next_available_subnet": "192.168.2.0/24"
+}
+```
+
 ## OpenShift Deployment
 
 ### 1. Build and Deploy
 
 ```bash
-# Easy deployment with script
+# Deploy IPAM4Lab to OpenShift (handles all edge cases automatically)
 ./deploy.sh ipam4lab 192.168.0.0/16
 
-# Or manually:
-# Create namespace
-oc new-project ipam4lab
+# Or with default network CIDR
+./deploy.sh
 
-# Apply manifests
-oc apply -f openshift/
-
-# Wait for deployment
-oc rollout status deployment/ipam4lab
+# Or specify only namespace
+./deploy.sh my-namespace
 ```
+
+The deployment script automatically handles:
+- ✅ **Security Context Constraints** - Uses OpenShift-compatible security contexts
+- ✅ **Image References** - Properly resolves internal registry image references
+- ✅ **Build Management** - Waits for build completion and verifies success
+- ✅ **Step-by-step Verification** - Checks each deployment stage
+- ✅ **Error Handling** - Provides detailed error messages and logs
+- ✅ **Health Checks** - Tests the deployed application
 
 ### 4. Undeploy
 

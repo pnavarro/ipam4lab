@@ -95,8 +95,27 @@ def test_ipam_service(base_url="http://localhost:8080"):
     
     print()
     
+    # Test stats endpoint
+    print("5️⃣  Testing stats endpoint...")
+    try:
+        response = requests.get(f"{base_url}/stats", timeout=5)
+        if response.status_code == 200:
+            print("✅ Stats endpoint successful")
+            stats = response.json()
+            print(f"   Active allocations: {stats['active_allocations']}")
+            print(f"   Total capacity: {stats['total_capacity']}")
+            print(f"   Utilization: {stats['utilization_percent']}%")
+        else:
+            print(f"❌ Stats endpoint failed: {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Stats endpoint failed: {e}")
+        return False
+    
+    print()
+    
     # Test deallocation
-    print(f"5️⃣  Testing deallocation for lab_uid: {test_lab_uid}")
+    print(f"6️⃣  Testing deallocation for lab_uid: {test_lab_uid}")
     try:
         response = requests.delete(
             f"{base_url}/deallocate",
@@ -119,7 +138,7 @@ def test_ipam_service(base_url="http://localhost:8080"):
     print()
     
     # Test duplicate allocation (should fail)
-    print(f"6️⃣  Testing duplicate allocation (should return existing)...")
+    print(f"7️⃣  Testing duplicate allocation (should return existing)...")
     try:
         # Allocate again
         response1 = requests.post(

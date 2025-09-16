@@ -1,21 +1,28 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: apps.openshift.io/v1
+kind: DeploymentConfig
 metadata:
-  name: ipam4lab
+  name: ipam4lab-dc
   labels:
     app: ipam4lab
     version: v1
-  annotations:
-    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"ipam4lab:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"ipam4lab\")].image"}]'
 spec:
   replicas: 1
   selector:
-    matchLabels:
-      app: ipam4lab
+    app: ipam4lab
+    deploymentconfig: ipam4lab-dc
+  strategy:
+    type: Rolling
+    rollingParams:
+      updatePeriodSeconds: 1
+      intervalSeconds: 1
+      timeoutSeconds: 600
+      maxUnavailable: 25%
+      maxSurge: 25%
   template:
     metadata:
       labels:
         app: ipam4lab
+        deploymentconfig: ipam4lab-dc
         version: v1
     spec:
       securityContext:
@@ -37,6 +44,8 @@ spec:
           value: "/data/ipam.db"
         - name: PORT
           value: "8080"
+        - name: PYTHONUNBUFFERED
+          value: "1"
         volumeMounts:
         - name: data
           mountPath: /data
@@ -51,7 +60,7 @@ spec:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
@@ -59,7 +68,7 @@ spec:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 5
+          initialDelaySeconds: 30
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
@@ -67,3 +76,13 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: ipam4lab-data
+  triggers:
+  - type: ConfigChange
+  - type: ImageChange
+    imageChangeParams:
+      automatic: true
+      containerNames:
+      - ipam4lab
+      from:
+        kind: ImageStreamTag
+        name: ipam4lab:latest
