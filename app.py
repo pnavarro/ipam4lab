@@ -48,6 +48,7 @@ class IPAMManager:
                     external_ip_worker_1 TEXT NOT NULL,
                     external_ip_worker_2 TEXT NOT NULL,
                     external_ip_worker_3 TEXT NOT NULL,
+                    external_ip_bastion TEXT NOT NULL,
                     public_net_start TEXT NOT NULL,
                     public_net_end TEXT NOT NULL,
                     conversion_host_ip TEXT NOT NULL,
@@ -55,6 +56,13 @@ class IPAMManager:
                     status TEXT DEFAULT 'active'
                 )
             ''')
+            
+            # Add the new external_ip_bastion column if it doesn't exist (for existing databases)
+            try:
+                cursor.execute('ALTER TABLE allocations ADD COLUMN external_ip_bastion TEXT')
+            except sqlite3.OperationalError:
+                # Column already exists, ignore the error
+                pass
             
             # Create subnet tracking table
             cursor.execute('''
@@ -106,6 +114,7 @@ class IPAMManager:
         external_ip_worker_1 = str(subnet_hosts[10])  # .11
         external_ip_worker_2 = str(subnet_hosts[11])  # .12
         external_ip_worker_3 = str(subnet_hosts[12])  # .13
+        external_ip_bastion = str(subnet_hosts[13])   # .14
         public_net_start = str(subnet_hosts[19])      # .20
         public_net_end = str(subnet_hosts[29])        # .30
         conversion_host_ip = str(subnet_hosts[28])    # .29
@@ -117,6 +126,7 @@ class IPAMManager:
             'external_ip_worker_1': external_ip_worker_1,
             'external_ip_worker_2': external_ip_worker_2,
             'external_ip_worker_3': external_ip_worker_3,
+            'external_ip_bastion': external_ip_bastion,
             'public_net_start': public_net_start,
             'public_net_end': public_net_end,
             'conversion_host_ip': conversion_host_ip
@@ -131,14 +141,15 @@ class IPAMManager:
                 cursor.execute('''
                     INSERT INTO allocations 
                     (lab_uid, subnet_start, subnet_end, external_ip_worker_1, 
-                     external_ip_worker_2, external_ip_worker_3, public_net_start, 
-                     public_net_end, conversion_host_ip)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
+                     public_net_start, public_net_end, conversion_host_ip)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     lab_uid, allocation['subnet_start'], allocation['subnet_end'],
                     allocation['external_ip_worker_1'], allocation['external_ip_worker_2'],
-                    allocation['external_ip_worker_3'], allocation['public_net_start'],
-                    allocation['public_net_end'], allocation['conversion_host_ip']
+                    allocation['external_ip_worker_3'], allocation['external_ip_bastion'],
+                    allocation['public_net_start'], allocation['public_net_end'], 
+                    allocation['conversion_host_ip']
                 ))
                 
                 # Mark subnet as allocated
@@ -166,8 +177,8 @@ class IPAMManager:
             
             cursor.execute('''
                 SELECT lab_uid, subnet_start, subnet_end, external_ip_worker_1,
-                       external_ip_worker_2, external_ip_worker_3, public_net_start,
-                       public_net_end, conversion_host_ip, allocated_at, status
+                       external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
+                       public_net_start, public_net_end, conversion_host_ip, allocated_at, status
                 FROM allocations WHERE lab_uid = ? AND status = 'active'
             ''', (lab_uid,))
             
@@ -182,11 +193,12 @@ class IPAMManager:
                     'external_ip_worker_1': row[3],
                     'external_ip_worker_2': row[4],
                     'external_ip_worker_3': row[5],
-                    'public_net_start': row[6],
-                    'public_net_end': row[7],
-                    'conversion_host_ip': row[8],
-                    'allocated_at': row[9],
-                    'status': row[10]
+                    'external_ip_bastion': row[6],
+                    'public_net_start': row[7],
+                    'public_net_end': row[8],
+                    'conversion_host_ip': row[9],
+                    'allocated_at': row[10],
+                    'status': row[11]
                 }
             return None
     
@@ -231,8 +243,8 @@ class IPAMManager:
             
             cursor.execute('''
                 SELECT lab_uid, subnet_start, subnet_end, external_ip_worker_1,
-                       external_ip_worker_2, external_ip_worker_3, public_net_start,
-                       public_net_end, conversion_host_ip, allocated_at, status
+                       external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
+                       public_net_start, public_net_end, conversion_host_ip, allocated_at, status
                 FROM allocations WHERE status = 'active'
                 ORDER BY allocated_at DESC
             ''')
@@ -246,11 +258,12 @@ class IPAMManager:
                     'external_ip_worker_1': row[3],
                     'external_ip_worker_2': row[4],
                     'external_ip_worker_3': row[5],
-                    'public_net_start': row[6],
-                    'public_net_end': row[7],
-                    'conversion_host_ip': row[8],
-                    'allocated_at': row[9],
-                    'status': row[10]
+                    'external_ip_bastion': row[6],
+                    'public_net_start': row[7],
+                    'public_net_end': row[8],
+                    'conversion_host_ip': row[9],
+                    'allocated_at': row[10],
+                    'status': row[11]
                 })
             
             conn.close()
@@ -322,23 +335,34 @@ def allocate():
     """Allocate IP range for a lab environment"""
     try:
         data = request.get_json()
-        if not data or 'lab_uid' not in data:
-            return jsonify({'error': 'lab_uid is required'}), 400
+        if not data or 'name' not in data:
+            return jsonify({'error': 'name is required'}), 400
         
-        lab_uid = data['lab_uid']
+        lab_uid = data['name']
         if not lab_uid or not isinstance(lab_uid, str):
-            return jsonify({'error': 'lab_uid must be a non-empty string'}), 400
+            return jsonify({'error': 'name must be a non-empty string'}), 400
         
         allocation = ipam.allocate_lab_network(lab_uid)
         
         # Format response as environment variables
         response = {
-            'lab_uid': lab_uid,
-            'allocation': allocation,
+            'name': lab_uid,
+            'subnet': f"{allocation['subnet_start']}/24",
+            'network': f"{allocation['subnet_start']}/24",
+            'allocation': {
+                'EXTERNAL_IP_WORKER_1': allocation['external_ip_worker_1'],
+                'EXTERNAL_IP_WORKER_2': allocation['external_ip_worker_2'],
+                'EXTERNAL_IP_WORKER_3': allocation['external_ip_worker_3'],
+                'EXTERNAL_IP_BASTION': allocation['external_ip_bastion'],
+                'PUBLIC_NET_START': allocation['public_net_start'],
+                'PUBLIC_NET_END': allocation['public_net_end'],
+                'CONVERSION_HOST_IP': allocation['conversion_host_ip']
+            },
             'env_vars': {
                 'EXTERNAL_IP_WORKER_1': allocation['external_ip_worker_1'],
                 'EXTERNAL_IP_WORKER_2': allocation['external_ip_worker_2'],
                 'EXTERNAL_IP_WORKER_3': allocation['external_ip_worker_3'],
+                'EXTERNAL_IP_BASTION': allocation['external_ip_bastion'],
                 'PUBLIC_NET_START': allocation['public_net_start'],
                 'PUBLIC_NET_END': allocation['public_net_end'],
                 'CONVERSION_HOST_IP': allocation['conversion_host_ip']
@@ -363,12 +387,23 @@ def get_allocation(lab_uid):
         
         # Format response as environment variables
         response = {
-            'lab_uid': lab_uid,
-            'allocation': allocation,
+            'name': lab_uid,
+            'subnet': f"{allocation['subnet_start']}/24",
+            'network': f"{allocation['subnet_start']}/24",
+            'allocation': {
+                'EXTERNAL_IP_WORKER_1': allocation['external_ip_worker_1'],
+                'EXTERNAL_IP_WORKER_2': allocation['external_ip_worker_2'],
+                'EXTERNAL_IP_WORKER_3': allocation['external_ip_worker_3'],
+                'EXTERNAL_IP_BASTION': allocation['external_ip_bastion'],
+                'PUBLIC_NET_START': allocation['public_net_start'],
+                'PUBLIC_NET_END': allocation['public_net_end'],
+                'CONVERSION_HOST_IP': allocation['conversion_host_ip']
+            },
             'env_vars': {
                 'EXTERNAL_IP_WORKER_1': allocation['external_ip_worker_1'],
                 'EXTERNAL_IP_WORKER_2': allocation['external_ip_worker_2'],
                 'EXTERNAL_IP_WORKER_3': allocation['external_ip_worker_3'],
+                'EXTERNAL_IP_BASTION': allocation['external_ip_bastion'],
                 'PUBLIC_NET_START': allocation['public_net_start'],
                 'PUBLIC_NET_END': allocation['public_net_end'],
                 'CONVERSION_HOST_IP': allocation['conversion_host_ip']
@@ -386,10 +421,10 @@ def deallocate():
     """Deallocate IP range for a lab environment"""
     try:
         data = request.get_json()
-        if not data or 'lab_uid' not in data:
-            return jsonify({'error': 'lab_uid is required'}), 400
+        if not data or 'name' not in data:
+            return jsonify({'error': 'name is required'}), 400
         
-        lab_uid = data['lab_uid']
+        lab_uid = data['name']
         ipam.deallocate_lab_network(lab_uid)
         
         return jsonify({'message': f'Successfully deallocated network for lab_uid: {lab_uid}'})
