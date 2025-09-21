@@ -5,6 +5,7 @@ IPAM4Lab is a Flask-based REST API service designed to allocate and manage IP ad
 ## Features
 
 - **Automatic IP Allocation**: Allocates IP ranges from a configurable network CIDR (default: 192.168.0.0/16)
+- **Cluster Support**: Supports multiple clusters with overlapping IP ranges
 - **Persistent State**: Uses SQLite database to track allocations
 - **RESTful API**: Simple HTTP endpoints for allocation, deallocation, and listing
 - **OpenShift Ready**: Includes deployment manifests and BuildConfig
@@ -22,9 +23,9 @@ The application allocates /24 subnets from the configured network CIDR and assig
 
 ### Example Allocations
 
-Each lab gets its own dedicated /24 subnet:
+Each lab gets its own dedicated /24 subnet within a cluster. IP ranges can overlap between different clusters:
 
-**First allocation** (`test-001`):
+**First allocation** (`test-001` in cluster `ocpv04`):
 ```
 EXTERNAL_IP_WORKER_1=192.168.0.11
 EXTERNAL_IP_WORKER_2=192.168.0.12
@@ -35,7 +36,7 @@ PUBLIC_NET_END=192.168.0.30
 CONVERSION_HOST_IP=192.168.0.29
 ```
 
-**Second allocation** (`test-002`):
+**Second allocation** (`test-002` in cluster `ocpv04`):
 ```
 EXTERNAL_IP_WORKER_1=192.168.1.11
 EXTERNAL_IP_WORKER_2=192.168.1.12
@@ -46,7 +47,18 @@ PUBLIC_NET_END=192.168.1.30
 CONVERSION_HOST_IP=192.168.1.29
 ```
 
-**Capacity**: With a `192.168.0.0/16` network, you can allocate up to **256 labs** (one per /24 subnet).
+**Third allocation** (`test-001` in cluster `ocpv05` - same lab name, different cluster):
+```
+EXTERNAL_IP_WORKER_1=192.168.0.11  # Same IP range as first allocation, but different cluster
+EXTERNAL_IP_WORKER_2=192.168.0.12
+EXTERNAL_IP_WORKER_3=192.168.0.13
+EXTERNAL_IP_BASTION=192.168.0.14
+PUBLIC_NET_START=192.168.0.20
+PUBLIC_NET_END=192.168.0.30
+CONVERSION_HOST_IP=192.168.0.29
+```
+
+**Capacity**: With a `192.168.0.0/16` network, you can allocate up to **256 labs per cluster** (one per /24 subnet).
 
 ## Quick Start
 
@@ -279,6 +291,40 @@ oc get route ipam4lab-route
 curl https://$(oc get route ipam4lab-route -o jsonpath='{.spec.host}')/health
 ```
 
+## Cluster Support
+
+IPAM4Lab supports multiple clusters with overlapping IP ranges. This allows the same lab names and IP ranges to be used across different clusters without conflicts.
+
+### Using Clusters
+
+**API Usage:**
+```bash
+# Allocate IPs for a lab in a specific cluster
+curl -X POST https://ipam4lab.example.com/allocate \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-lab", "cluster": "ocpv04"}'
+
+# Get allocation for a specific cluster
+curl "https://ipam4lab.example.com/allocation/my-lab?cluster=ocpv04"
+
+# List all allocations in a cluster
+curl "https://ipam4lab.example.com/allocations?cluster=ocpv04"
+
+# Deallocate from a specific cluster
+curl -X DELETE https://ipam4lab.example.com/deallocate \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-lab", "cluster": "ocpv04"}'
+```
+
+**Ansible Usage:**
+```bash
+# Allocate IPs for a lab in cluster ocpv04
+ansible-playbook ansible/ipam_allocation.yml -e lab_id=my-lab -e cluster_name=ocpv04
+
+# Clean up from specific cluster
+ansible-playbook ansible/ipam_deallocation.yml -e lab_id=my-lab -e cluster_name=ocpv04
+```
+
 ## Ansible Integration
 
 The `ansible/` directory contains ready-to-use playbooks for automating IP allocation:
@@ -286,14 +332,20 @@ The `ansible/` directory contains ready-to-use playbooks for automating IP alloc
 ### Basic Usage
 
 ```bash
-# Allocate IPs for a lab
+# Allocate IPs for a lab (default cluster)
 ansible-playbook ansible/ipam_allocation.yml -e lab_id=my-lab
+
+# Allocate IPs for a lab in specific cluster
+ansible-playbook ansible/ipam_allocation.yml -e lab_id=my-lab -e cluster_name=ocpv04
 
 # Use the allocated IPs in your infrastructure playbooks
 ansible-playbook -i ansible/inventory.yml your-playbook.yml
 
-# Clean up when done
+# Clean up when done (default cluster)
 ansible-playbook ansible/ipam_deallocation.yml -e lab_id=my-lab
+
+# Clean up from specific cluster
+ansible-playbook ansible/ipam_deallocation.yml -e lab_id=my-lab -e cluster_name=ocpv04
 ```
 
 ### Example in Infrastructure Automation
@@ -303,6 +355,7 @@ ansible-playbook ansible/ipam_deallocation.yml -e lab_id=my-lab
 - import_playbook: ansible/ipam_allocation.yml
   vars:
     lab_id: "{{ lab_environment_id }}"
+    cluster_name: "{{ cluster_name | default('default') }}"
     ipam_service_url: "https://ipam4lab.example.com"
 
 - name: Configure lab infrastructure

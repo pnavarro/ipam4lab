@@ -42,7 +42,8 @@ class IPAMManager:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS allocations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    lab_uid TEXT UNIQUE NOT NULL,
+                    lab_uid TEXT NOT NULL,
+                    cluster TEXT NOT NULL,
                     subnet_start TEXT NOT NULL,
                     subnet_end TEXT NOT NULL,
                     external_ip_worker_1 TEXT NOT NULL,
@@ -53,7 +54,8 @@ class IPAMManager:
                     public_net_end TEXT NOT NULL,
                     conversion_host_ip TEXT NOT NULL,
                     allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    status TEXT DEFAULT 'active'
+                    status TEXT DEFAULT 'active',
+                    UNIQUE(lab_uid, cluster)
                 )
             ''')
             
@@ -64,28 +66,44 @@ class IPAMManager:
                 # Column already exists, ignore the error
                 pass
             
+            # Add cluster column if it doesn't exist (for existing databases)
+            try:
+                cursor.execute('ALTER TABLE allocations ADD COLUMN cluster TEXT DEFAULT "default"')
+            except sqlite3.OperationalError:
+                # Column already exists, ignore the error
+                pass
+            
             # Create subnet tracking table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS subnet_tracking (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    subnet_cidr TEXT UNIQUE NOT NULL,
+                    subnet_cidr TEXT NOT NULL,
+                    cluster TEXT NOT NULL,
                     lab_uid TEXT,
                     allocated BOOLEAN DEFAULT FALSE,
-                    allocated_at TIMESTAMP
+                    allocated_at TIMESTAMP,
+                    UNIQUE(subnet_cidr, cluster)
                 )
             ''')
+            
+            # Add cluster column to subnet_tracking if it doesn't exist (for existing databases)
+            try:
+                cursor.execute('ALTER TABLE subnet_tracking ADD COLUMN cluster TEXT DEFAULT "default"')
+            except sqlite3.OperationalError:
+                # Column already exists, ignore the error
+                pass
             
             conn.commit()
             conn.close()
     
-    def get_next_available_subnet(self):
-        """Get the next available /24 subnet from the network"""
+    def get_next_available_subnet(self, cluster="default"):
+        """Get the next available /24 subnet from the network for a specific cluster"""
         with db_lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Get all allocated subnets
-            cursor.execute('SELECT subnet_cidr FROM subnet_tracking WHERE allocated = TRUE')
+            # Get all allocated subnets for this cluster
+            cursor.execute('SELECT subnet_cidr FROM subnet_tracking WHERE allocated = TRUE AND cluster = ?', (cluster,))
             allocated_subnets = set(row[0] for row in cursor.fetchall())
             
             # Find first available /24 subnet
@@ -96,15 +114,15 @@ class IPAMManager:
                     return subnet
             
             conn.close()
-            raise ValueError("No available subnets in the network range")
+            raise ValueError(f"No available subnets in the network range for cluster: {cluster}")
     
-    def allocate_lab_network(self, lab_uid):
+    def allocate_lab_network(self, lab_uid, cluster="default"):
         """Allocate a network slice for a lab environment"""
-        if self.get_allocation(lab_uid):
-            raise ValueError(f"Lab UID {lab_uid} already has an allocation")
+        if self.get_allocation(lab_uid, cluster):
+            raise ValueError(f"Lab UID {lab_uid} already has an allocation in cluster {cluster}")
         
-        # Get next available subnet
-        subnet = self.get_next_available_subnet()
+        # Get next available subnet for this cluster
+        subnet = self.get_next_available_subnet(cluster)
         subnet_hosts = list(subnet.hosts())
         
         if len(subnet_hosts) < 30:
@@ -121,6 +139,7 @@ class IPAMManager:
         
         allocation = {
             'lab_uid': lab_uid,
+            'cluster': cluster,
             'subnet_start': str(subnet.network_address),
             'subnet_end': str(subnet.broadcast_address),
             'external_ip_worker_1': external_ip_worker_1,
@@ -140,24 +159,24 @@ class IPAMManager:
                 # Insert allocation
                 cursor.execute('''
                     INSERT INTO allocations 
-                    (lab_uid, subnet_start, subnet_end, external_ip_worker_1, 
+                    (lab_uid, cluster, subnet_start, subnet_end, external_ip_worker_1, 
                      external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
                      public_net_start, public_net_end, conversion_host_ip)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    lab_uid, allocation['subnet_start'], allocation['subnet_end'],
+                    lab_uid, cluster, allocation['subnet_start'], allocation['subnet_end'],
                     allocation['external_ip_worker_1'], allocation['external_ip_worker_2'],
                     allocation['external_ip_worker_3'], allocation['external_ip_bastion'],
                     allocation['public_net_start'], allocation['public_net_end'], 
                     allocation['conversion_host_ip']
                 ))
                 
-                # Mark subnet as allocated
+                # Mark subnet as allocated for this cluster
                 cursor.execute('''
                     INSERT OR REPLACE INTO subnet_tracking 
-                    (subnet_cidr, lab_uid, allocated, allocated_at)
-                    VALUES (?, ?, TRUE, CURRENT_TIMESTAMP)
-                ''', (str(subnet), lab_uid))
+                    (subnet_cidr, cluster, lab_uid, allocated, allocated_at)
+                    VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP)
+                ''', (str(subnet), cluster, lab_uid))
                 
                 conn.commit()
                 logger.info(f"Allocated network for lab_uid: {lab_uid}")
@@ -169,18 +188,18 @@ class IPAMManager:
             finally:
                 conn.close()
     
-    def get_allocation(self, lab_uid):
-        """Get existing allocation for a lab UID"""
+    def get_allocation(self, lab_uid, cluster="default"):
+        """Get existing allocation for a lab UID in a specific cluster"""
         with db_lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT lab_uid, subnet_start, subnet_end, external_ip_worker_1,
+                SELECT lab_uid, cluster, subnet_start, subnet_end, external_ip_worker_1,
                        external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
                        public_net_start, public_net_end, conversion_host_ip, allocated_at, status
-                FROM allocations WHERE lab_uid = ? AND status = 'active'
-            ''', (lab_uid,))
+                FROM allocations WHERE lab_uid = ? AND cluster = ? AND status = 'active'
+            ''', (lab_uid, cluster))
             
             row = cursor.fetchone()
             conn.close()
@@ -188,25 +207,26 @@ class IPAMManager:
             if row:
                 return {
                     'lab_uid': row[0],
-                    'subnet_start': row[1],
-                    'subnet_end': row[2],
-                    'external_ip_worker_1': row[3],
-                    'external_ip_worker_2': row[4],
-                    'external_ip_worker_3': row[5],
-                    'external_ip_bastion': row[6],
-                    'public_net_start': row[7],
-                    'public_net_end': row[8],
-                    'conversion_host_ip': row[9],
-                    'allocated_at': row[10],
-                    'status': row[11]
+                    'cluster': row[1],
+                    'subnet_start': row[2],
+                    'subnet_end': row[3],
+                    'external_ip_worker_1': row[4],
+                    'external_ip_worker_2': row[5],
+                    'external_ip_worker_3': row[6],
+                    'external_ip_bastion': row[7],
+                    'public_net_start': row[8],
+                    'public_net_end': row[9],
+                    'conversion_host_ip': row[10],
+                    'allocated_at': row[11],
+                    'status': row[12]
                 }
             return None
     
-    def deallocate_lab_network(self, lab_uid):
+    def deallocate_lab_network(self, lab_uid, cluster="default"):
         """Deallocate network for a lab environment"""
-        allocation = self.get_allocation(lab_uid)
+        allocation = self.get_allocation(lab_uid, cluster)
         if not allocation:
-            raise ValueError(f"No active allocation found for lab_uid: {lab_uid}")
+            raise ValueError(f"No active allocation found for lab_uid: {lab_uid} in cluster: {cluster}")
         
         with db_lock:
             conn = sqlite3.connect(self.db_path)
@@ -216,17 +236,17 @@ class IPAMManager:
                 # Mark allocation as inactive
                 cursor.execute('''
                     UPDATE allocations SET status = 'inactive' 
-                    WHERE lab_uid = ? AND status = 'active'
-                ''', (lab_uid,))
+                    WHERE lab_uid = ? AND cluster = ? AND status = 'active'
+                ''', (lab_uid, cluster))
                 
-                # Mark subnet as available
+                # Mark subnet as available for this cluster
                 cursor.execute('''
                     UPDATE subnet_tracking SET allocated = FALSE, lab_uid = NULL
-                    WHERE lab_uid = ?
-                ''', (lab_uid,))
+                    WHERE lab_uid = ? AND cluster = ?
+                ''', (lab_uid, cluster))
                 
                 conn.commit()
-                logger.info(f"Deallocated network for lab_uid: {lab_uid}")
+                logger.info(f"Deallocated network for lab_uid: {lab_uid} in cluster: {cluster}")
                 return True
                 
             except Exception as e:
@@ -235,35 +255,45 @@ class IPAMManager:
             finally:
                 conn.close()
     
-    def list_allocations(self):
-        """List all active allocations"""
+    def list_allocations(self, cluster=None):
+        """List all active allocations, optionally filtered by cluster"""
         with db_lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            cursor.execute('''
-                SELECT lab_uid, subnet_start, subnet_end, external_ip_worker_1,
-                       external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
-                       public_net_start, public_net_end, conversion_host_ip, allocated_at, status
-                FROM allocations WHERE status = 'active'
-                ORDER BY allocated_at DESC
-            ''')
+            if cluster:
+                cursor.execute('''
+                    SELECT lab_uid, cluster, subnet_start, subnet_end, external_ip_worker_1,
+                           external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
+                           public_net_start, public_net_end, conversion_host_ip, allocated_at, status
+                    FROM allocations WHERE status = 'active' AND cluster = ?
+                    ORDER BY allocated_at DESC
+                ''', (cluster,))
+            else:
+                cursor.execute('''
+                    SELECT lab_uid, cluster, subnet_start, subnet_end, external_ip_worker_1,
+                           external_ip_worker_2, external_ip_worker_3, external_ip_bastion,
+                           public_net_start, public_net_end, conversion_host_ip, allocated_at, status
+                    FROM allocations WHERE status = 'active'
+                    ORDER BY allocated_at DESC
+                ''')
             
             allocations = []
             for row in cursor.fetchall():
                 allocations.append({
                     'lab_uid': row[0],
-                    'subnet_start': row[1],
-                    'subnet_end': row[2],
-                    'external_ip_worker_1': row[3],
-                    'external_ip_worker_2': row[4],
-                    'external_ip_worker_3': row[5],
-                    'external_ip_bastion': row[6],
-                    'public_net_start': row[7],
-                    'public_net_end': row[8],
-                    'conversion_host_ip': row[9],
-                    'allocated_at': row[10],
-                    'status': row[11]
+                    'cluster': row[1],
+                    'subnet_start': row[2],
+                    'subnet_end': row[3],
+                    'external_ip_worker_1': row[4],
+                    'external_ip_worker_2': row[5],
+                    'external_ip_worker_3': row[6],
+                    'external_ip_bastion': row[7],
+                    'public_net_start': row[8],
+                    'public_net_end': row[9],
+                    'conversion_host_ip': row[10],
+                    'allocated_at': row[11],
+                    'status': row[12]
                 })
             
             conn.close()
@@ -342,11 +372,17 @@ def allocate():
         if not lab_uid or not isinstance(lab_uid, str):
             return jsonify({'error': 'name must be a non-empty string'}), 400
         
-        allocation = ipam.allocate_lab_network(lab_uid)
+        # Get cluster parameter, default to "default" if not provided
+        cluster = data.get('cluster', 'default')
+        if not isinstance(cluster, str):
+            return jsonify({'error': 'cluster must be a string'}), 400
+        
+        allocation = ipam.allocate_lab_network(lab_uid, cluster)
         
         # Format response as environment variables
         response = {
             'name': lab_uid,
+            'cluster': cluster,
             'subnet': f"{allocation['subnet_start']}/24",
             'network': f"{allocation['subnet_start']}/24",
             'allocation': {
@@ -381,13 +417,17 @@ def allocate():
 def get_allocation(lab_uid):
     """Get existing allocation for a lab UID"""
     try:
-        allocation = ipam.get_allocation(lab_uid)
+        # Get cluster parameter from query string, default to "default"
+        cluster = request.args.get('cluster', 'default')
+        
+        allocation = ipam.get_allocation(lab_uid, cluster)
         if not allocation:
-            return jsonify({'error': f'No allocation found for lab_uid: {lab_uid}'}), 404
+            return jsonify({'error': f'No allocation found for lab_uid: {lab_uid} in cluster: {cluster}'}), 404
         
         # Format response as environment variables
         response = {
             'name': lab_uid,
+            'cluster': cluster,
             'subnet': f"{allocation['subnet_start']}/24",
             'network': f"{allocation['subnet_start']}/24",
             'allocation': {
@@ -425,9 +465,14 @@ def deallocate():
             return jsonify({'error': 'name is required'}), 400
         
         lab_uid = data['name']
-        ipam.deallocate_lab_network(lab_uid)
+        # Get cluster parameter, default to "default" if not provided
+        cluster = data.get('cluster', 'default')
+        if not isinstance(cluster, str):
+            return jsonify({'error': 'cluster must be a string'}), 400
         
-        return jsonify({'message': f'Successfully deallocated network for lab_uid: {lab_uid}'})
+        ipam.deallocate_lab_network(lab_uid, cluster)
+        
+        return jsonify({'message': f'Successfully deallocated network for lab_uid: {lab_uid} in cluster: {cluster}'})
         
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
@@ -437,9 +482,12 @@ def deallocate():
 
 @app.route('/allocations', methods=['GET'])
 def list_allocations():
-    """List all active allocations"""
+    """List all active allocations, optionally filtered by cluster"""
     try:
-        allocations = ipam.list_allocations()
+        # Get cluster parameter from query string, optional
+        cluster = request.args.get('cluster')
+        
+        allocations = ipam.list_allocations(cluster)
         return jsonify({'allocations': allocations})
         
     except Exception as e:
