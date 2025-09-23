@@ -29,7 +29,7 @@ db_lock = threading.Lock()
 class IPAMManager:
     def __init__(self, db_path, network_cidr):
         self.db_path = db_path
-        self.network = ipaddress.IPv4Network(network_cidr)
+        self.base_network = ipaddress.IPv4Network(network_cidr)
         self.init_database()
     
     def init_database(self):
@@ -73,75 +73,121 @@ class IPAMManager:
                 # Column already exists, ignore the error
                 pass
             
-            # Create subnet tracking table
+            # Create cluster networks table to track /16 assignments per cluster
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS subnet_tracking (
+                CREATE TABLE IF NOT EXISTS cluster_networks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    subnet_cidr TEXT NOT NULL,
-                    cluster TEXT NOT NULL,
-                    lab_uid TEXT,
-                    allocated BOOLEAN DEFAULT FALSE,
-                    allocated_at TIMESTAMP,
-                    UNIQUE(subnet_cidr, cluster)
+                    cluster TEXT UNIQUE NOT NULL,
+                    network_cidr TEXT NOT NULL,
+                    allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Add cluster column to subnet_tracking if it doesn't exist (for existing databases)
-            try:
-                cursor.execute('ALTER TABLE subnet_tracking ADD COLUMN cluster TEXT DEFAULT "default"')
-            except sqlite3.OperationalError:
-                # Column already exists, ignore the error
-                pass
+            # Create IP tracking table for individual IP allocation within cluster networks
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ip_tracking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT NOT NULL,
+                    cluster TEXT NOT NULL,
+                    lab_uid TEXT,
+                    ip_type TEXT NOT NULL,  -- 'worker1', 'worker2', 'worker3', 'bastion', 'conversion'
+                    allocated BOOLEAN DEFAULT FALSE,
+                    allocated_at TIMESTAMP,
+                    UNIQUE(ip_address, cluster)
+                )
+            ''')
             
             conn.commit()
             conn.close()
     
-    def get_next_available_subnet(self, cluster="default"):
-        """Get the next available /24 subnet from the network for a specific cluster"""
+    def get_or_create_cluster_network(self, cluster="default"):
+        """Get the shared /16 network for all clusters (all clusters use the same CIDR)"""
         with db_lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Get all allocated subnets for this cluster
-            cursor.execute('SELECT subnet_cidr FROM subnet_tracking WHERE allocated = TRUE AND cluster = ?', (cluster,))
-            allocated_subnets = set(row[0] for row in cursor.fetchall())
+            # Check if cluster already has a network assigned
+            cursor.execute('SELECT network_cidr FROM cluster_networks WHERE cluster = ?', (cluster,))
+            result = cursor.fetchone()
             
-            # Find first available /24 subnet
-            for subnet in self.network.subnets(new_prefix=24):
-                subnet_str = str(subnet)
-                if subnet_str not in allocated_subnets:
-                    conn.close()
-                    return subnet
+            if result:
+                conn.close()
+                return ipaddress.IPv4Network(result[0])
+            
+            # All clusters use the same base network CIDR (e.g., 192.168.0.0/16)
+            shared_network_str = str(self.base_network)
+            
+            # Assign the same base network to this cluster
+            cursor.execute('''
+                INSERT INTO cluster_networks (cluster, network_cidr)
+                VALUES (?, ?)
+            ''', (cluster, shared_network_str))
+            conn.commit()
+            conn.close()
+            logger.info(f"Assigned shared network {shared_network_str} to cluster {cluster}")
+            return self.base_network
+    
+    def get_next_available_ips(self, cluster="default", count=16):
+        """Get next available sequential IPs from cluster's /16 network"""
+        # Get or create the /16 network for this cluster
+        cluster_network = self.get_or_create_cluster_network(cluster)
+        
+        with db_lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get all allocated IPs for this cluster
+            cursor.execute('SELECT ip_address FROM ip_tracking WHERE allocated = TRUE AND cluster = ?', (cluster,))
+            allocated_ips = set(row[0] for row in cursor.fetchall())
+            
+            # Find sequential available IPs
+            available_ips = []
+            for ip in cluster_network.hosts():
+                ip_str = str(ip)
+                if ip_str not in allocated_ips:
+                    available_ips.append(ip_str)
+                    if len(available_ips) >= count:
+                        break
             
             conn.close()
-            raise ValueError(f"No available subnets in the network range for cluster: {cluster}")
+            
+            if len(available_ips) < count:
+                raise ValueError(f"Not enough available IPs in cluster {cluster}. Need {count}, found {len(available_ips)}")
+            
+            return available_ips[:count]
+    
     
     def allocate_lab_network(self, lab_uid, cluster="default"):
-        """Allocate a network slice for a lab environment"""
+        """Allocate individual IPs for a lab environment from cluster's shared /16 network"""
         if self.get_allocation(lab_uid, cluster):
             raise ValueError(f"Lab UID {lab_uid} already has an allocation in cluster {cluster}")
         
-        # Get next available subnet for this cluster
-        subnet = self.get_next_available_subnet(cluster)
-        subnet_hosts = list(subnet.hosts())
+        # Get next available IPs from cluster's shared /16 network
+        # We need 16 IPs: 3 workers + 1 bastion + 12 for public range (including conversion host)
+        available_ips = self.get_next_available_ips(cluster, count=16)
         
-        if len(subnet_hosts) < 30:
-            raise ValueError("Subnet too small for allocation")
+        # Assign IPs according to the pattern
+        external_ip_worker_1 = available_ips[0]  # First IP: Worker 1
+        external_ip_worker_2 = available_ips[1]  # Second IP: Worker 2
+        external_ip_worker_3 = available_ips[2]  # Third IP: Worker 3
+        external_ip_bastion = available_ips[3]   # Fourth IP: Bastion
         
-        # Allocate specific IPs according to the pattern
-        external_ip_worker_1 = str(subnet_hosts[10])  # .11
-        external_ip_worker_2 = str(subnet_hosts[11])  # .12
-        external_ip_worker_3 = str(subnet_hosts[12])  # .13
-        external_ip_bastion = str(subnet_hosts[13])   # .14
-        public_net_start = str(subnet_hosts[19])      # .20
-        public_net_end = str(subnet_hosts[29])        # .30
-        conversion_host_ip = str(subnet_hosts[28])    # .29
+        # Public range: next 12 IPs (available_ips[4] through available_ips[15])
+        # This gives us PUBLIC_NET_START to PUBLIC_NET_END with 10 available IPs between them
+        public_net_start = available_ips[4]      # Fifth IP: Start of public range
+        public_net_end = available_ips[15]       # Sixteenth IP: End of public range (12 total IPs in range, 10 available between start/end)
+        
+        # Conversion host: one of the available IPs in the middle of the public range
+        conversion_host_ip = available_ips[10]   # Eleventh IP: Within the public range
+        
+        # Get cluster network for subnet info
+        cluster_network = self.get_or_create_cluster_network(cluster)
         
         allocation = {
             'lab_uid': lab_uid,
             'cluster': cluster,
-            'subnet_start': str(subnet.network_address),
-            'subnet_end': str(subnet.broadcast_address),
+            'subnet_start': str(cluster_network.network_address),
+            'subnet_end': str(cluster_network.broadcast_address),
             'external_ip_worker_1': external_ip_worker_1,
             'external_ip_worker_2': external_ip_worker_2,
             'external_ip_worker_3': external_ip_worker_3,
@@ -171,15 +217,40 @@ class IPAMManager:
                     allocation['conversion_host_ip']
                 ))
                 
-                # Mark subnet as allocated for this cluster
-                cursor.execute('''
-                    INSERT OR REPLACE INTO subnet_tracking 
-                    (subnet_cidr, cluster, lab_uid, allocated, allocated_at)
-                    VALUES (?, ?, ?, TRUE, CURRENT_TIMESTAMP)
-                ''', (str(subnet), cluster, lab_uid))
+                # Mark all 16 individual IPs as allocated in the IP tracking table
+                ip_assignments = []
+                
+                # Worker and bastion IPs
+                ip_assignments.extend([
+                    (external_ip_worker_1, 'worker1'),
+                    (external_ip_worker_2, 'worker2'),
+                    (external_ip_worker_3, 'worker3'),
+                    (external_ip_bastion, 'bastion'),
+                ])
+                
+                # All 12 IPs in the public range (including conversion host)
+                for i in range(4, 16):  # available_ips[4] through available_ips[15]
+                    ip_address = available_ips[i]
+                    if ip_address == conversion_host_ip:
+                        ip_type = 'conversion'
+                    elif ip_address == public_net_start:
+                        ip_type = 'public_start'
+                    elif ip_address == public_net_end:
+                        ip_type = 'public_end'
+                    else:
+                        ip_type = 'public_range'
+                    
+                    ip_assignments.append((ip_address, ip_type))
+                
+                for ip_address, ip_type in ip_assignments:
+                    cursor.execute('''
+                        INSERT INTO ip_tracking 
+                        (ip_address, cluster, lab_uid, ip_type, allocated, allocated_at)
+                        VALUES (?, ?, ?, ?, TRUE, CURRENT_TIMESTAMP)
+                    ''', (ip_address, cluster, lab_uid, ip_type))
                 
                 conn.commit()
-                logger.info(f"Allocated network for lab_uid: {lab_uid}")
+                logger.info(f"Allocated {len(ip_assignments)} IPs for lab_uid: {lab_uid} in cluster: {cluster}")
                 return allocation
                 
             except Exception as e:
@@ -223,7 +294,7 @@ class IPAMManager:
             return None
     
     def deallocate_lab_network(self, lab_uid, cluster="default"):
-        """Deallocate network for a lab environment"""
+        """Deallocate individual IPs for a lab environment"""
         allocation = self.get_allocation(lab_uid, cluster)
         if not allocation:
             raise ValueError(f"No active allocation found for lab_uid: {lab_uid} in cluster: {cluster}")
@@ -239,14 +310,14 @@ class IPAMManager:
                     WHERE lab_uid = ? AND cluster = ? AND status = 'active'
                 ''', (lab_uid, cluster))
                 
-                # Mark subnet as available for this cluster
+                # Mark individual IPs as available for this cluster
                 cursor.execute('''
-                    UPDATE subnet_tracking SET allocated = FALSE, lab_uid = NULL
+                    UPDATE ip_tracking SET allocated = FALSE, lab_uid = NULL
                     WHERE lab_uid = ? AND cluster = ?
                 ''', (lab_uid, cluster))
                 
                 conn.commit()
-                logger.info(f"Deallocated network for lab_uid: {lab_uid} in cluster: {cluster}")
+                logger.info(f"Deallocated IPs for lab_uid: {lab_uid} in cluster: {cluster}")
                 return True
                 
             except Exception as e:
@@ -299,57 +370,112 @@ class IPAMManager:
             conn.close()
             return allocations
     
-    def get_allocation_stats(self):
+    def get_allocation_stats(self, cluster=None):
         """Get allocation statistics and capacity information"""
         with db_lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Count active allocations
-            cursor.execute('SELECT COUNT(*) FROM allocations WHERE status = "active"')
-            active_allocations = cursor.fetchone()[0]
-            
-            # Calculate total capacity (number of /24 subnets available)
-            total_capacity = 2 ** (24 - self.network.prefixlen)
-            
-            # Calculate utilization percentage
-            utilization_percent = (active_allocations / total_capacity) * 100 if total_capacity > 0 else 0
-            
-            # Get subnet usage information
-            cursor.execute('''
-                SELECT subnet_start, COUNT(*) as count
-                FROM allocations 
-                WHERE status = "active"
-                GROUP BY subnet_start
-                ORDER BY subnet_start
-            ''')
-            
-            subnet_usage = []
-            for row in cursor.fetchall():
-                subnet_usage.append({
-                    'subnet': f"{row[0]}/24",
-                    'labs_allocated': row[1]
-                })
+            if cluster:
+                # Stats for specific cluster
+                cursor.execute('SELECT COUNT(*) FROM allocations WHERE status = "active" AND cluster = ?', (cluster,))
+                active_allocations = cursor.fetchone()[0]
+                
+                # Get cluster network
+                cursor.execute('SELECT network_cidr FROM cluster_networks WHERE cluster = ?', (cluster,))
+                cluster_network_result = cursor.fetchone()
+                if cluster_network_result:
+                    cluster_network = ipaddress.IPv4Network(cluster_network_result[0])
+                    # Count total usable IPs in the /16 network (65534 for /16)
+                    total_ips = cluster_network.num_addresses - 2  # Exclude network and broadcast
+                    # Count allocated IPs
+                    cursor.execute('SELECT COUNT(*) FROM ip_tracking WHERE allocated = TRUE AND cluster = ?', (cluster,))
+                    allocated_ips = cursor.fetchone()[0]
+                    utilization_percent = (allocated_ips / total_ips) * 100 if total_ips > 0 else 0
+                else:
+                    total_ips = 65534  # Default /16 capacity
+                    allocated_ips = 0
+                    utilization_percent = 0
+                
+                # Get IP usage breakdown
+                cursor.execute('''
+                    SELECT ip_type, COUNT(*) as count
+                    FROM ip_tracking 
+                    WHERE allocated = TRUE AND cluster = ?
+                    GROUP BY ip_type
+                    ORDER BY ip_type
+                ''', (cluster,))
+                
+                ip_usage = []
+                for row in cursor.fetchall():
+                    ip_usage.append({
+                        'ip_type': row[0],
+                        'count': row[1]
+                    })
+                
+                stats = {
+                    'base_network_cidr': str(self.base_network),
+                    'cluster': cluster,
+                    'cluster_network': cluster_network_result[0] if cluster_network_result else None,
+                    'active_lab_allocations': active_allocations,
+                    'total_ips_in_cluster': total_ips,
+                    'allocated_ips': allocated_ips,
+                    'available_ips': total_ips - allocated_ips,
+                    'utilization_percent': round(utilization_percent, 3),
+                    'ips_per_lab': 16,  # Each lab gets 16 IPs (3 workers + 1 bastion + 12 for public range)
+                    'estimated_max_labs': (total_ips - allocated_ips) // 16,
+                    'ip_usage_by_type': ip_usage
+                }
+                    
+            else:
+                # Global stats across all clusters
+                cursor.execute('SELECT COUNT(*) FROM allocations WHERE status = "active"')
+                total_active_allocations = cursor.fetchone()[0]
+                
+                # Get cluster information
+                cursor.execute('SELECT cluster, network_cidr FROM cluster_networks ORDER BY cluster')
+                clusters = cursor.fetchall()
+                
+                # Since all clusters share the same /16 network, total capacity is just the base network
+                total_ips_possible = self.base_network.num_addresses - 2  # Usable IPs in the shared /16 network
+                
+                # Count total allocated IPs across all clusters
+                cursor.execute('SELECT COUNT(*) FROM ip_tracking WHERE allocated = TRUE')
+                total_allocated_ips = cursor.fetchone()[0]
+                
+                utilization_percent = (total_allocated_ips / total_ips_possible) * 100 if total_ips_possible > 0 else 0
+                
+                # Get per-cluster allocation counts
+                cursor.execute('''
+                    SELECT cluster, COUNT(*) as count
+                    FROM allocations 
+                    WHERE status = "active"
+                    GROUP BY cluster
+                    ORDER BY cluster
+                ''')
+                
+                cluster_usage = []
+                for row in cursor.fetchall():
+                    cluster_usage.append({
+                        'cluster': row[0],
+                        'labs_allocated': row[1]
+                    })
+                
+                stats = {
+                    'shared_network_cidr': str(self.base_network),
+                    'total_active_lab_allocations': total_active_allocations,
+                    'active_clusters': len(clusters),
+                    'total_ips_available': total_ips_possible,
+                    'total_allocated_ips': total_allocated_ips,
+                    'utilization_percent': round(utilization_percent, 3),
+                    'ips_per_lab': 16,
+                    'estimated_max_total_labs': (total_ips_possible - total_allocated_ips) // 16,
+                    'note': 'All clusters share the same network CIDR with overlapping IP allocations',
+                    'clusters': [{'cluster': c[0], 'network': c[1]} for c in clusters],
+                    'cluster_usage': cluster_usage
+                }
             
             conn.close()
-            
-            stats = {
-                'network_cidr': str(self.network),
-                'active_allocations': active_allocations,
-                'total_capacity': total_capacity,
-                'utilization_percent': round(utilization_percent, 3),
-                'subnets_per_lab': 1,  # Each lab gets one /24 subnet
-                'subnet_usage': subnet_usage,
-                'next_available_subnet': None
-            }
-            
-            # Try to get next available subnet
-            try:
-                next_subnet = self.get_next_available_subnet()
-                stats['next_available_subnet'] = str(next_subnet)
-            except ValueError:
-                stats['next_available_subnet'] = None
-            
             return stats
 
 # Initialize IPAM manager

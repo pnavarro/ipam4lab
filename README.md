@@ -14,51 +14,115 @@ IPAM4Lab is a Flask-based REST API service designed to allocate and manage IP ad
 
 ## Architecture
 
-The application allocates /24 subnets from the configured network CIDR and assigns specific IPs within each subnet:
+The application uses a shared IP allocation model where **all clusters use the same network CIDR**:
 
-- **Worker IPs**: .11, .12, .13 (EXTERNAL_IP_WORKER_1, EXTERNAL_IP_WORKER_2, EXTERNAL_IP_WORKER_3)
-- **Bastion IP**: .14 (EXTERNAL_IP_BASTION)
-- **Public Network Range**: .20 to .30 (PUBLIC_NET_START, PUBLIC_NET_END)
-- **Conversion Host**: .29 (CONVERSION_HOST_IP)
+1. **Shared Network**: All clusters use the same configured CIDR (e.g., `192.168.0.0/16`)
+2. **Overlapping Allocations**: Labs in different clusters can have identical IP addresses
+3. **Cluster Isolation**: Despite using the same CIDR, clusters are logically separated
+4. **Shared IP Pool**: All labs across all clusters share the same 65,534 usable IPs from `192.168.0.0/16`
+5. **Individual IPs**: Each lab gets 16 specific individual IP addresses from the shared pool
+
+### IP Allocation Pattern
+
+Each lab gets **16 individual IP addresses** sequentially from its cluster's shared `/16` network:
+- **3 Worker IPs**: EXTERNAL_IP_WORKER_1, EXTERNAL_IP_WORKER_2, EXTERNAL_IP_WORKER_3
+- **1 Bastion IP**: EXTERNAL_IP_BASTION
+- **12 Public Range IPs**: Including PUBLIC_NET_START, PUBLIC_NET_END, and CONVERSION_HOST_IP
+  - **PUBLIC_NET_START**: First IP of the range
+  - **PUBLIC_NET_END**: Last IP of the range (12 IPs total in range)
+  - **CONVERSION_HOST_IP**: One IP within the public range (10 available IPs between start and end)
+  - **10 Available IPs**: Between PUBLIC_NET_START and PUBLIC_NET_END for lab use
 
 ### Example Allocations
 
-Each lab gets its own dedicated /24 subnet within a cluster. IP ranges can overlap between different clusters:
+**All clusters share the same network**: `192.168.0.0/16` *(65,534 total usable IPs)*
 
 **First allocation** (`test-001` in cluster `ocpv04`):
 ```
-EXTERNAL_IP_WORKER_1=192.168.0.11
-EXTERNAL_IP_WORKER_2=192.168.0.12
-EXTERNAL_IP_WORKER_3=192.168.0.13
-EXTERNAL_IP_BASTION=192.168.0.14
-PUBLIC_NET_START=192.168.0.20
-PUBLIC_NET_END=192.168.0.30
-CONVERSION_HOST_IP=192.168.0.29
+EXTERNAL_IP_WORKER_1=192.168.0.1   # First available IP
+EXTERNAL_IP_WORKER_2=192.168.0.2   # Second available IP  
+EXTERNAL_IP_WORKER_3=192.168.0.3   # Third available IP
+EXTERNAL_IP_BASTION=192.168.0.4     # Fourth available IP
+
+# Public range: 12 consecutive IPs
+PUBLIC_NET_START=192.168.0.5        # Start of public range
+# IPs 192.168.0.6 through 192.168.0.15 are available for lab use
+CONVERSION_HOST_IP=192.168.0.11     # One IP within the public range  
+PUBLIC_NET_END=192.168.0.16         # End of public range
+# 10 available IPs between start and end: .6, .7, .8, .9, .10, .11, .12, .13, .14, .15
 ```
 
 **Second allocation** (`test-002` in cluster `ocpv04`):
 ```
-EXTERNAL_IP_WORKER_1=192.168.1.11
-EXTERNAL_IP_WORKER_2=192.168.1.12
-EXTERNAL_IP_WORKER_3=192.168.1.13
-EXTERNAL_IP_BASTION=192.168.1.14
-PUBLIC_NET_START=192.168.1.20
-PUBLIC_NET_END=192.168.1.30
-CONVERSION_HOST_IP=192.168.1.29
+EXTERNAL_IP_WORKER_1=192.168.0.17  # Next available IP (continues sequentially)
+EXTERNAL_IP_WORKER_2=192.168.0.18  # Next available IP
+EXTERNAL_IP_WORKER_3=192.168.0.19  # Next available IP
+EXTERNAL_IP_BASTION=192.168.0.20    # Next available IP
+
+# Public range: next 12 consecutive IPs
+PUBLIC_NET_START=192.168.0.21       # Start of public range
+# IPs 192.168.0.22 through 192.168.0.31 are available for lab use
+CONVERSION_HOST_IP=192.168.0.27     # One IP within the public range
+PUBLIC_NET_END=192.168.0.32         # End of public range
+# 10 available IPs between start and end: .22, .23, .24, .25, .26, .27, .28, .29, .30, .31
 ```
 
-**Third allocation** (`test-001` in cluster `ocpv05` - same lab name, different cluster):
+**Third allocation** (`test-001` in cluster `ocpv05`):
 ```
-EXTERNAL_IP_WORKER_1=192.168.0.11  # Same IP range as first allocation, but different cluster
-EXTERNAL_IP_WORKER_2=192.168.0.12
-EXTERNAL_IP_WORKER_3=192.168.0.13
-EXTERNAL_IP_BASTION=192.168.0.14
-PUBLIC_NET_START=192.168.0.20
-PUBLIC_NET_END=192.168.0.30
-CONVERSION_HOST_IP=192.168.0.29
+EXTERNAL_IP_WORKER_1=192.168.0.1    # Same IP as cluster ocpv04 - overlapping allocation!
+EXTERNAL_IP_WORKER_2=192.168.0.2    # Same IP addresses can be used in different clusters
+EXTERNAL_IP_WORKER_3=192.168.0.3    # Clusters logically isolated despite same CIDR
+EXTERNAL_IP_BASTION=192.168.0.4     # No IP conflicts - overlapping by design
+
+# Public range: 12 consecutive IPs (same as ocpv04 - overlapping allocation)
+PUBLIC_NET_START=192.168.0.5        # Start of public range  
+CONVERSION_HOST_IP=192.168.0.11     # One IP within the public range
+PUBLIC_NET_END=192.168.0.16         # End of public range
+# 10 available IPs between start and end: .6, .7, .8, .9, .10, .11, .12, .13, .14, .15
 ```
 
-**Capacity**: With a `192.168.0.0/16` network, you can allocate up to **256 labs per cluster** (one per /24 subnet).
+**Fourth allocation** (`test-002` in cluster `ocpv05`):
+```
+EXTERNAL_IP_WORKER_1=192.168.0.17   # Continues from same shared pool
+EXTERNAL_IP_WORKER_2=192.168.0.18   # Same pattern - clusters track their own allocations
+EXTERNAL_IP_WORKER_3=192.168.0.19   # IP overlap with ocpv04 is allowed and expected
+EXTERNAL_IP_BASTION=192.168.0.20    # Each cluster manages its own labs
+
+# Public range: next 12 consecutive IPs
+PUBLIC_NET_START=192.168.0.21       # Start of public range
+CONVERSION_HOST_IP=192.168.0.27     # One IP within the public range
+PUBLIC_NET_END=192.168.0.32         # End of public range  
+# 10 available IPs between start and end: .22, .23, .24, .25, .26, .27, .28, .29, .30, .31
+```
+
+### IP Overlap Between Clusters
+
+**✅ IP addresses CAN and DO overlap between different clusters**
+
+- **Shared CIDR**: All clusters use the same network CIDR (`192.168.0.0/16`)
+- **Identical IPs Allowed**: Lab `test-001` in `ocpv04` and `ocpv05` both use `192.168.0.1`
+- **Logical Separation**: Clusters are isolated in the application layer, not network layer
+- **Overlapping by Design**: Same IP addresses are intentionally reused across clusters
+
+**Example of intentional IP overlap:**
+```bash
+# Cluster ocpv04 (shared 192.168.0.0/16):
+test-001: EXTERNAL_IP_WORKER_1=192.168.0.1
+
+# Cluster ocpv05 (same 192.168.0.0/16): 
+test-001: EXTERNAL_IP_WORKER_1=192.168.0.1  # Exact same IP in different cluster
+
+# Both labs can coexist with identical IPs!
+```
+
+### Capacity
+
+- **Shared Pool**: All clusters share the same **65,534 usable IPs** from `192.168.0.0/16`
+- **Total Labs**: Up to **4,095 labs total** across all clusters (65,534 ÷ 16 IPs per lab)
+- **IP Reuse**: Same IP addresses can be allocated in multiple clusters simultaneously
+- **Efficient Usage**: Each cluster can allocate from the full IP range independently
+- **Public IP Range**: Each lab gets 10 available IPs between PUBLIC_NET_START and PUBLIC_NET_END
+- **Overlap Design**: Multiple clusters can have identical allocations without conflict
 
 ## Quick Start
 
@@ -293,7 +357,14 @@ curl https://$(oc get route ipam4lab-route -o jsonpath='{.spec.host}')/health
 
 ## Cluster Support
 
-IPAM4Lab supports multiple clusters with overlapping IP ranges. This allows the same lab names and IP ranges to be used across different clusters without conflicts.
+IPAM4Lab supports multiple clusters with **identical shared CIDR and overlapping IP allocations**. All clusters use the same network CIDR (`192.168.0.0/16`) and can allocate identical IP addresses without conflicts.
+
+**Key Benefits:**
+- **Shared CIDR**: All clusters use the same `192.168.0.0/16` network
+- **IP Reuse**: Identical IP addresses (e.g., `192.168.0.1`) can be allocated in multiple clusters simultaneously
+- **Predictable Addressing**: Labs get consistent IP patterns regardless of cluster
+- **Logical Isolation**: Clusters are separated at the application level, not network level
+- **Resource Efficiency**: Every cluster can use the full IP range independently
 
 ### Using Clusters
 
