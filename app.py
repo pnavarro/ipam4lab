@@ -127,8 +127,39 @@ class IPAMManager:
             logger.info(f"Assigned shared network {shared_network_str} to cluster {cluster}")
             return self.base_network
     
+    def is_protected_ip(self, ip_str):
+        """Check if an IP address is in a protected range that should not be allocated"""
+        ip = ipaddress.IPv4Address(ip_str)
+        
+        # Define protected IP ranges within 192.168.0.0/16
+        protected_ranges = [
+            ipaddress.IPv4Network('192.168.0.0/24'),    # First subnet - often used for infrastructure
+            ipaddress.IPv4Network('192.168.1.0/24'),    # Second subnet - often used for infrastructure  
+            ipaddress.IPv4Network('192.168.255.0/24'),  # Last subnet - often used for management
+            ipaddress.IPv4Network('192.168.254.0/24'),  # Second to last - often used for management
+        ]
+        
+        # Check specific protected IPs
+        protected_ips = [
+            ipaddress.IPv4Address('192.168.0.1'),       # Default gateway
+            ipaddress.IPv4Address('192.168.0.254'),     # Common gateway
+            ipaddress.IPv4Address('192.168.1.1'),       # Common gateway
+            ipaddress.IPv4Address('192.168.1.254'),     # Common gateway
+        ]
+        
+        # Check if IP is in any protected range
+        for protected_range in protected_ranges:
+            if ip in protected_range:
+                return True
+                
+        # Check if IP is a specific protected IP
+        if ip in protected_ips:
+            return True
+            
+        return False
+    
     def get_next_available_ips(self, cluster="default", count=16):
-        """Get next available sequential IPs from cluster's /16 network"""
+        """Get next available sequential IPs from cluster's /16 network, avoiding protected ranges"""
         # Get or create the /16 network for this cluster
         cluster_network = self.get_or_create_cluster_network(cluster)
         
@@ -140,11 +171,12 @@ class IPAMManager:
             cursor.execute('SELECT ip_address FROM ip_tracking WHERE allocated = TRUE AND cluster = ?', (cluster,))
             allocated_ips = set(row[0] for row in cursor.fetchall())
             
-            # Find sequential available IPs
+            # Find sequential available IPs, skipping protected ranges
             available_ips = []
             for ip in cluster_network.hosts():
                 ip_str = str(ip)
-                if ip_str not in allocated_ips:
+                # Skip if IP is already allocated or in protected range
+                if ip_str not in allocated_ips and not self.is_protected_ip(ip_str):
                     available_ips.append(ip_str)
                     if len(available_ips) >= count:
                         break
@@ -152,7 +184,7 @@ class IPAMManager:
             conn.close()
             
             if len(available_ips) < count:
-                raise ValueError(f"Not enough available IPs in cluster {cluster}. Need {count}, found {len(available_ips)}")
+                raise ValueError(f"Not enough available IPs in cluster {cluster}. Need {count}, found {len(available_ips)} (excluding protected ranges)")
             
             return available_ips[:count]
     
@@ -436,8 +468,10 @@ class IPAMManager:
                 cursor.execute('SELECT cluster, network_cidr FROM cluster_networks ORDER BY cluster')
                 clusters = cursor.fetchall()
                 
-                # Since all clusters share the same /16 network, total capacity is just the base network
-                total_ips_possible = self.base_network.num_addresses - 2  # Usable IPs in the shared /16 network
+                # Since all clusters share the same /16 network, total capacity is base network minus protected ranges
+                total_ips_in_network = self.base_network.num_addresses - 2  # Usable IPs (excluding network/broadcast)
+                protected_ips_count = 1024  # 4 x /24 subnets = 1024 protected IPs
+                total_ips_possible = total_ips_in_network - protected_ips_count  # Available for allocation
                 
                 # Count total allocated IPs across all clusters
                 cursor.execute('SELECT COUNT(*) FROM ip_tracking WHERE allocated = TRUE')
@@ -465,12 +499,14 @@ class IPAMManager:
                     'shared_network_cidr': str(self.base_network),
                     'total_active_lab_allocations': total_active_allocations,
                     'active_clusters': len(clusters),
+                    'total_ips_in_network': total_ips_in_network,
+                    'protected_ips_count': protected_ips_count,
                     'total_ips_available': total_ips_possible,
                     'total_allocated_ips': total_allocated_ips,
                     'utilization_percent': round(utilization_percent, 3),
                     'ips_per_lab': 16,
                     'estimated_max_total_labs': (total_ips_possible - total_allocated_ips) // 16,
-                    'note': 'All clusters share the same network CIDR with overlapping IP allocations',
+                    'note': 'All clusters share the same network CIDR with overlapping IP allocations. Protected ranges are excluded from allocation.',
                     'clusters': [{'cluster': c[0], 'network': c[1]} for c in clusters],
                     'cluster_usage': cluster_usage
                 }
@@ -629,6 +665,33 @@ def get_stats():
         
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/protected-ranges', methods=['GET'])
+def get_protected_ranges():
+    """Get information about protected IP ranges that are not allocated"""
+    try:
+        protected_info = {
+            'protected_subnets': [
+                '192.168.0.0/24',   # First subnet - infrastructure
+                '192.168.1.0/24',   # Second subnet - infrastructure
+                '192.168.254.0/24', # Second to last - management
+                '192.168.255.0/24'  # Last subnet - management
+            ],
+            'protected_specific_ips': [
+                '192.168.0.1',      # Default gateway
+                '192.168.0.254',    # Common gateway
+                '192.168.1.1',      # Common gateway
+                '192.168.1.254'     # Common gateway
+            ],
+            'total_protected_ips': 1024,  # 4 x 256 IPs per /24 subnet
+            'available_for_allocation': 65534 - 1024,  # Total minus protected
+            'note': 'These IP ranges are reserved for infrastructure and will not be allocated to labs'
+        }
+        return jsonify(protected_info)
+        
+    except Exception as e:
+        logger.error(f"Error getting protected ranges: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':

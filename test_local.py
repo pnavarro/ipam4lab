@@ -237,6 +237,27 @@ def test_ipam_service(base_url="http://localhost:8080"):
         return False
     
     print()
+    
+    # Test protected ranges endpoint
+    print("9️⃣  Testing protected ranges endpoint...")
+    try:
+        response = requests.get(f"{base_url}/protected-ranges", timeout=5)
+        if response.status_code == 200:
+            print("✅ Protected ranges endpoint successful")
+            protected_info = response.json()
+            print(f"   Protected subnets: {len(protected_info['protected_subnets'])}")
+            print(f"   Protected specific IPs: {len(protected_info['protected_specific_ips'])}")
+            print(f"   Total protected IPs: {protected_info['total_protected_ips']}")
+            print(f"   Available for allocation: {protected_info['available_for_allocation']}")
+            print(f"   Note: {protected_info['note']}")
+        else:
+            print(f"❌ Protected ranges endpoint failed: {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Protected ranges endpoint failed: {e}")
+        return False
+    
+    print()
     print("🎉 All tests passed successfully!")
     return True
 

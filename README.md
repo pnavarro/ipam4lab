@@ -35,7 +35,9 @@ Each lab gets **16 individual IP addresses** sequentially from its cluster's sha
 
 ### Example Allocations
 
-**All clusters share the same network**: `192.168.0.0/16` *(65,534 total usable IPs)*
+**All clusters share the same network**: `192.168.0.0/16` *(64,510 total usable IPs, excluding protected ranges)*
+
+**Note**: With protected ranges enabled, actual allocations will start from `192.168.2.x` range, but the examples below show the allocation pattern.
 
 **First allocation** (`test-001` in cluster `ocpv04`):
 ```
@@ -117,12 +119,33 @@ test-001: EXTERNAL_IP_WORKER_1=192.168.0.1  # Exact same IP in different cluster
 
 ### Capacity
 
-- **Shared Pool**: All clusters share the same **65,534 usable IPs** from `192.168.0.0/16`
-- **Total Labs**: Up to **4,095 labs total** across all clusters (65,534 ÷ 16 IPs per lab)
+- **Shared Pool**: All clusters share the same **64,510 usable IPs** from `192.168.0.0/16`
+- **Protected Ranges**: **1,024 IPs reserved** for infrastructure and management (see Protected IP Ranges below)
+- **Total Labs**: Up to **4,031 labs total** across all clusters (64,510 ÷ 16 IPs per lab)
 - **IP Reuse**: Same IP addresses can be allocated in multiple clusters simultaneously
-- **Efficient Usage**: Each cluster can allocate from the full IP range independently
+- **Efficient Usage**: Each cluster can allocate from the available IP range independently
 - **Public IP Range**: Each lab gets 10 available IPs between PUBLIC_NET_START and PUBLIC_NET_END
 - **Overlap Design**: Multiple clusters can have identical allocations without conflict
+
+### Protected IP Ranges
+
+To avoid conflicts with infrastructure and management systems, the following IP ranges are **protected** and will not be allocated to labs:
+
+#### **Protected Subnets** (1,024 IPs total):
+- **`192.168.0.0/24`** - First subnet, typically used for infrastructure
+- **`192.168.1.0/24`** - Second subnet, typically used for infrastructure
+- **`192.168.254.0/24`** - Second-to-last subnet, typically used for management
+- **`192.168.255.0/24`** - Last subnet, typically used for management
+
+#### **Protected Specific IPs**:
+- **`192.168.0.1`** - Common default gateway
+- **`192.168.0.254`** - Common gateway address
+- **`192.168.1.1`** - Common gateway address
+- **`192.168.1.254`** - Common gateway address
+
+#### **Available Range for Lab Allocation**:
+- **`192.168.2.1`** through **`192.168.253.254`** (excluding protected specific IPs)
+- Labs will be allocated from these safe ranges only
 
 ## Quick Start
 
@@ -274,22 +297,50 @@ Get allocation statistics and capacity information.
 **Response (200):**
 ```json
 {
-  "network_cidr": "192.168.0.0/16",
-  "active_allocations": 2,
-  "total_capacity": 256,
-  "utilization_percent": 0.781,
-  "subnets_per_lab": 1,
-  "subnet_usage": [
-    {
-      "subnet": "192.168.0.0/24",
-      "labs_allocated": 1
-    },
-    {
-      "subnet": "192.168.1.0/24", 
-      "labs_allocated": 1
-    }
+  "shared_network_cidr": "192.168.0.0/16",
+  "total_active_lab_allocations": 5,
+  "active_clusters": 3,
+  "total_ips_in_network": 65534,
+  "protected_ips_count": 1024,
+  "total_ips_available": 64510,
+  "total_allocated_ips": 80,
+  "utilization_percent": 0.124,
+  "ips_per_lab": 16,
+  "estimated_max_total_labs": 4031,
+  "note": "All clusters share the same network CIDR with overlapping IP allocations. Protected ranges are excluded from allocation.",
+  "clusters": [
+    {"cluster": "production", "network": "192.168.0.0/16"},
+    {"cluster": "development", "network": "192.168.0.0/16"}
   ],
-  "next_available_subnet": "192.168.2.0/24"
+  "cluster_usage": [
+    {"cluster": "production", "labs_allocated": 3},
+    {"cluster": "development", "labs_allocated": 2}
+  ]
+}
+```
+
+### GET /protected-ranges
+
+Get information about protected IP ranges that are not allocated to labs.
+
+**Response (200):**
+```json
+{
+  "protected_subnets": [
+    "192.168.0.0/24",
+    "192.168.1.0/24", 
+    "192.168.254.0/24",
+    "192.168.255.0/24"
+  ],
+  "protected_specific_ips": [
+    "192.168.0.1",
+    "192.168.0.254",
+    "192.168.1.1",
+    "192.168.1.254"
+  ],
+  "total_protected_ips": 1024,
+  "available_for_allocation": 64510,
+  "note": "These IP ranges are reserved for infrastructure and will not be allocated to labs"
 }
 ```
 
