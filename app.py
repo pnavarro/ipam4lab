@@ -134,9 +134,11 @@ class IPAMManager:
         # Define protected IP ranges within 192.168.0.0/16
         protected_ranges = [
             ipaddress.IPv4Network('192.168.0.0/24'),    # First subnet - often used for infrastructure
-            ipaddress.IPv4Network('192.168.1.0/24'),    # Second subnet - often used for infrastructure  
-            ipaddress.IPv4Network('192.168.255.0/24'),  # Last subnet - often used for management
+            ipaddress.IPv4Network('192.168.1.0/24'),    # Second subnet - often used for infrastructure
+            ipaddress.IPv4Network('192.168.2.0/24'),    # Third subnet - often used for infrastructure
+            ipaddress.IPv4Network('192.168.3.0/24'),    # Fourth subnet - often used for infrastructure
             ipaddress.IPv4Network('192.168.254.0/24'),  # Second to last - often used for management
+            ipaddress.IPv4Network('192.168.255.0/24'),  # Last subnet - often used for management
         ]
         
         # Check specific protected IPs
@@ -470,7 +472,7 @@ class IPAMManager:
                 
                 # Since all clusters share the same /16 network, total capacity is base network minus protected ranges
                 total_ips_in_network = self.base_network.num_addresses - 2  # Usable IPs (excluding network/broadcast)
-                protected_ips_count = 1024  # 4 x /24 subnets = 1024 protected IPs
+                protected_ips_count = 1536  # 6 x /24 subnets = 1536 protected IPs
                 total_ips_possible = total_ips_in_network - protected_ips_count  # Available for allocation
                 
                 # Count total allocated IPs across all clusters
@@ -675,6 +677,8 @@ def get_protected_ranges():
             'protected_subnets': [
                 '192.168.0.0/24',   # First subnet - infrastructure
                 '192.168.1.0/24',   # Second subnet - infrastructure
+                '192.168.2.0/24',   # Third subnet - infrastructure
+                '192.168.3.0/24',   # Fourth subnet - infrastructure
                 '192.168.254.0/24', # Second to last - management
                 '192.168.255.0/24'  # Last subnet - management
             ],
@@ -684,8 +688,8 @@ def get_protected_ranges():
                 '192.168.1.1',      # Common gateway
                 '192.168.1.254'     # Common gateway
             ],
-            'total_protected_ips': 1024,  # 4 x 256 IPs per /24 subnet
-            'available_for_allocation': 65534 - 1024,  # Total minus protected
+            'total_protected_ips': 1536,  # 6 x 256 IPs per /24 subnet
+            'available_for_allocation': 65534 - 1536,  # Total minus protected
             'note': 'These IP ranges are reserved for infrastructure and will not be allocated to labs'
         }
         return jsonify(protected_info)
