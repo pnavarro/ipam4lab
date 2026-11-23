@@ -96,7 +96,22 @@ class IPAMManager:
                     UNIQUE(ip_address, cluster)
                 )
             ''')
-            
+
+            # Drop stale released rows left by the previous deallocation logic,
+            # which flagged IPs instead of deleting them. A row with
+            # allocated = FALSE holds no reservation — get_next_available_ips
+            # ignores those rows entirely — but it still occupies the
+            # UNIQUE(ip_address, cluster) slot, so it makes every later
+            # allocation on that cluster fail with IntegrityError, surfacing as
+            # HTTP 500. Clearing them here heals clusters poisoned before the
+            # fix; afterwards this is a no-op, because deallocate_lab_network
+            # now deletes.
+            cursor.execute('DELETE FROM ip_tracking WHERE allocated = FALSE')
+            if cursor.rowcount > 0:
+                logger.warning(
+                    f"Removed {cursor.rowcount} stale released rows from ip_tracking"
+                )
+
             conn.commit()
             conn.close()
     
@@ -344,9 +359,19 @@ class IPAMManager:
                     WHERE lab_uid = ? AND cluster = ? AND status = 'active'
                 ''', (lab_uid, cluster))
                 
-                # Mark individual IPs as available for this cluster
+                # Release the individual IPs for this cluster.
+                #
+                # These rows must be DELETED, not flagged. ip_tracking carries
+                # UNIQUE(ip_address, cluster) and allocate_lab_network writes to
+                # it with a plain INSERT, while get_next_available_ips only
+                # excludes rows with allocated = TRUE. A row left behind with
+                # allocated = FALSE is therefore handed out again on the next
+                # allocation, and the INSERT fails with IntegrityError. That is
+                # not a ValueError, so it escapes the endpoint's business-error
+                # branch and surfaces as an opaque HTTP 500 — permanently, for
+                # every subsequent allocation on that cluster.
                 cursor.execute('''
-                    UPDATE ip_tracking SET allocated = FALSE, lab_uid = NULL
+                    DELETE FROM ip_tracking
                     WHERE lab_uid = ? AND cluster = ?
                 ''', (lab_uid, cluster))
                 
@@ -573,8 +598,18 @@ def allocate():
         
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        logger.error(f"Error allocating network: {e}")
+    except sqlite3.IntegrityError as e:
+        # Almost always a leftover ip_tracking row colliding with
+        # UNIQUE(ip_address, cluster). Name it instead of hiding it.
+        logger.exception(
+            f"IntegrityError allocating for lab_uid={lab_uid!r} cluster={cluster!r}; "
+            f"likely a stale ip_tracking row for an already released IP"
+        )
+        return jsonify({'error': f'IP bookkeeping conflict for cluster {cluster}: {e}'}), 500
+    except Exception:
+        logger.exception(
+            f"Error allocating network for lab_uid={lab_uid!r} cluster={cluster!r}"
+        )
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/allocation/<lab_uid>', methods=['GET'])
